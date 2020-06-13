@@ -1,0 +1,276 @@
+---
+title: "aip_assignment"
+author: "Group A8"
+output:
+  html_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r import, message=FALSE}
+rm(list = ls()) # clean the memory
+library(tidyverse)
+library(DataExplorer)
+library(ROSE)
+library(caTools)
+library(e1071) 
+library(caret)
+library(partykit) 
+library(tree)
+library(randomForest)
+library(pROC) #calculate TP and FP automatically
+library(CustomerScoringMetrics) #cumulative (gain) chart
+library(naivebayes)
+library(DMwR) #SMOTE sampling library
+library(FSelector)
+library(CustomerScoringMetrics)
+library(ElemStatLearn) 
+```
+
+
+**R Data preperation**
+
+
+Before applying modelling techniques, data has to be prepared. Firstly, data from 'bank-full.csv' file is imported into R. And all variables,data types and values are reviewed to ensure they are correct, without missing values. Then the levels of the target variable are checked for later stages in modelling.
+
+```{r imprt dataset}
+bank_set <- read.csv('bank-full.csv', sep=';')
+str(bank_set)
+summary(bank_set)
+```
+```{r data manipulation}
+#check the levels of target variable 
+levels(bank_set$y) 
+#no need to change the order of the levels
+```
+
+
+**Exploratory Data Analysis**
+
+
+Once the data has been imported to R, Exploratory Data Analysis was conducted to get a visualised understanding of the dataset. Dataexplorer library was used since it covers most of the required visualisation for data understanding.
+
+Main findings: 
+  - the target variable (y) is imbalanced, with 'no' as the majority class.
+  - there is no missing values in the dataset
+  
+```{r exploratory}
+head(bank_set)
+summary(bank_set)
+
+plot_str(bank_set)
+plot_missing(bank_set)
+plot_histogram(bank_set)
+plot_density(bank_set)
+plot_bar(bank_set)
+```
+
+
+**Data Partitioning and Sampling**
+
+#Partitioning
+
+The bank dataset was partitioned on a 70-30 split for training and test set. 
+
+```{r Data Partitioning}
+
+# ------- Partitioning
+set.seed(123)  
+
+split = sample.split(bank_set$y, SplitRatio = 0.7)   
+training_set = subset(bank_set, split == TRUE) 
+test_set = subset(bank_set, split == FALSE) 
+
+```
+
+#Sampling
+
+Since the dataset was unbalanced for the target variable (y), sampling methods were used to balance the dataset. The issue of class imbalance can result in a serious bias towards the majority class, reducing the classification performance and increasing the number of false negatives. 
+
+Four sampling methods were tested. Eventually, a mix of oversampling and undersampling was picked and defined as 'sampled'.
+
+```{r sampling methods}
+
+sampled <- ovun.sample(y ~ ., data = training_set, method = "both", p=0.5, seed=123)$data
+summary(sampled)
+
+```
+
+```{r Undersampling, message=FALSE}
+sampled_un <- ovun.sample(y ~ ., data = training_set, method = "under", p=0.5, seed=123)$data
+summary(sampled_un)
+```
+
+```{r Oversampling, message=FALSE}
+sampled_ov <- ovun.sample(y ~ ., data = training_set, method = "over", p=0.5, seed=123)$data
+summary(sampled_ov)
+```
+
+```{r SMOTE, message=FALSE}
+sampled_sm <-SMOTE(y~.,data= training_set, perc.over = 200, k = 5, perc.under = 200)
+summary(sampled_sm)
+
+```
+
+
+**Information Gain**
+
+
+Information gain is utilised to reveal the importance of each attribute in terms of determining whether a customer will subscribe to the long-term deposit. Then the five most critical attributes are selected and a new training set is generated depending on these attributes.
+
+```{r with information gain}
+
+# Compute information gain, and select 5 attributes with the highest attributes weights
+attribute_weights <- information.gain(y ~., bank_set)
+filtered_attributes <- cutoff.k(attribute_weights, 5)
+print(attribute_weights)
+# select the most important attributes from the balanced training set
+sampled_ig <-sampled[filtered_attributes]
+sampled_ig$y<-sampled$y
+summary(sampled_ig)
+
+```
+
+
+**Modelling**
+
+
+Four modelling techniques were tested to build a classification model that can help predict the customer behaviour for this study. Namely;
+  - Support Vector Machine (SVM)
+  - Decision Tree
+  - Random Forest
+  - Naive Bayes
+ 
+```{r SVM}
+
+# ------- SVM: model
+svm_radial  <- svm(y~. , data =  sampled_ig, kernel = "radial", scale = TRUE, probability = TRUE)
+svm_predict <- predict(svm_radial, test_set,  probability = TRUE)
+
+# ------- SVM: confusion matrix (for both test and training sets)
+confusionMatrix(svm_predict, test_set$y, positive='yes')
+
+# ------- SVM: ROC Prep
+svm_prob <- attr(svm_predict, "probabilities")[,2] 
+ROC_svm <- roc(y ~ svm_prob, data = test_set)
+df_svm = data.frame((1-ROC_svm$specificities), ROC_svm$sensitivities)
+```
+
+
+```{r Decision Tree}
+
+# ------- Decision Tree: model
+
+decTree  <- ctree(y~. , data =  sampled_ig)
+decTree_predict = predict(decTree, test_set, type= "response",probability=TRUE)
+decTree_prob <- predict(decTree, test_set, type="prob") # Obtain class probabilities for decision tree
+
+# ------- Decision Tree: confusion matrix
+confusionMatrix(decTree_predict, test_set$y, positive = "yes")
+
+# ------- Decision Tree: ROC Prep
+ROC_decTree <- roc(y ~ decTree_prob[,2], data = test_set,levels=c("no","yes"))
+df_decTree = data.frame((1-ROC_decTree$specificities), ROC_decTree$sensitivities)
+```
+
+
+```{r Random Forest}
+# ------- Random Forest: model
+rf <- randomForest(y ~ .,data=sampled_ig) 
+rf_predict <- predict(rf, test_set, type="prob") 
+
+rf_predict_result <-ifelse(rf_predict[,2]>0.5,"yes","no")
+rf_predict_result <- as.factor(rf_predict_result)
+
+# ------- Random Forest: confusion matrix
+confusionMatrix(rf_predict_result, test_set$y, positive='yes')
+
+# ------- Random Forest: ROC Prep
+ROC_rf <- roc(y ~ rf_predict[,2], data = test_set)
+df_rf = data.frame((1-ROC_rf$specificities), ROC_rf$sensitivities)
+```
+
+
+```{r Naive Bayes}
+
+# ------- Naive Bayes: model
+naiveb <- naive_bayes(y ~ ., data = sampled_ig)
+naiveb_predict <- predict(naiveb, test_set, type = "prob")
+
+naiveb_predict_result <-ifelse(naiveb_predict[,2]>0.5,"yes","no")
+naiveb_predict_result <- as.factor(naiveb_predict_result)
+
+# ------- Naive Bayes: confusion matrix
+confusionMatrix(naiveb_predict_result, test_set$y, positive='yes')
+
+# ------- Naive Bayes: ROC Prep
+ROC_naiveb <- roc(y ~ naiveb_predict[,2], data = test_set)
+df_naiveb <- data.frame((1-ROC_naiveb$specificities), ROC_naiveb$sensitivities)
+```
+
+
+**Evaluation**
+
+
+After finishing the modelling process, the performances of four models are compared using several evaluation methods, including ROC, AUC and Gain charts.
+
+ROC plots the Sensitivity and Specificity of a binary classifier as its discrimination threshold are differed.
+In order to find the model with best overall performance, AUC, a statistical method that describes the performance of each classifier, is also utilised. 
+
+```{r ROC Plot four models}
+
+# Plot the ROC curve for four models
+plot(df_svm, col="red", type="l",           
+xlab="False Positive Rate (1-Specificity)", ylab="True Positive Rate (Sensitivity)")
+lines(df_rf, col="blue")               
+lines(df_naiveb, col="green")
+lines(df_decTree, col="dark green")
+abline(a = 0, b = 1, col = "lightgray") #adds a diagonal line
+
+legend("bottomright",              #add a legend to show model names 
+c("SVM", "Random Forest", "Naive Bayes", "Decision Tree"),
+fill=c("red", "blue", "green", "dark green"))
+
+# Print the AUC
+print(ROC_svm)
+print(ROC_rf)
+print(ROC_naiveb)
+print(ROC_decTree)
+```
+
+
+**Gain Chart**
+
+The Gain chart evaluates the capability of four models to state correct predictions by connecting with percentages of test instances. 
+
+```{r Cumulative Gain Plot four models}
+
+# Obtain Gain chart values for four models
+
+GainTable_SVM <- cumGainsTable(svm_prob, test_set$y, resolution = 1/100)
+GainTable_RF<-cumGainsTable(rf_predict[,2],test_set$y,resolution = 1/100)
+GainTable_NB<-cumGainsTable(naiveb_predict[,2],test_set$y,resolution = 1/100)
+GainTable_decTree <- cumGainsTable(decTree_prob[,2], test_set$y, resolution = 1/100)
+
+# Plot the gain charts for all models
+
+plot(GainTable_SVM[,4], col="red", type="l",     
+xlab="Percentage of test instances", ylab="Percentage of correct predictions")
+lines(GainTable_RF[,4],col="blue",type="l")
+lines(GainTable_NB[,4],col="green",type="l")
+lines(GainTable_decTree[,4],col="dark green",type="l")
+abline(a = 0, b = 1, col = "lightgray") #adds a diagonal line for baseline or random model
+
+legend("bottomright",
+c("SVM", "Random Forest", "Naive Bayes", "Decision Tree"),
+fill=c("red", "blue", "green", "dark green"))
+
+```
+
+
+
+
+
+
+
